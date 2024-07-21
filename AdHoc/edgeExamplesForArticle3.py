@@ -1,15 +1,14 @@
 import pandas as pd
 
 from ReportProcessing.intradayDetailReport import read_intraday_details, extract_symbol_details
-from Util.datesAndTimestamps import timestamp, time_string, trading_dates, previous_trading_date
+from Util.datesAndTimestamps import timestamp, date_string, time_string, trading_dates, previous_trading_date
 from Util.pathsAndStockSets import StockSet, set_stock_set, get_symbols, temp_files_path
 
 set_stock_set(StockSet.SP500)
 
-
 # Higher Highs; Higher Lows. First approach: look for 3 candles where highs and lows increase; see what percentage gain
 # we have after 10 minutes
-if False:
+if True:
     results = list()  # List of DataFrame
     for ts in trading_dates(timestamp('2023-12-01'), timestamp('2024-05-31')):
         print(ts)
@@ -85,6 +84,51 @@ if False:
     results_df = results_df.round(4)
     results_df.to_csv(temp_files_path('hhhl_results_second_try.csv'), index=False)
 
+# Fast Follower Strategy -- Average Gains Tables
+if False:
+    lookback_window = 10  # Look at the previous 10 trading days when finding correlations (two weeks)
+    trigger_gain_threshold = 1.0  # Trigger if the stock goes up 1% during the trigger window
+    effect_window = 3  # Sell after 15 minutes
+
+    def compute_trigger_and_effect_df(intraday_details):
+        symbol_results = list()  # List of DataFrame (one for each symbol)
+        for symbol in get_symbols():
+            s_hist = extract_symbol_details(intraday_details, symbol)
+            s_hist['trigger_pct'] = 100 * (s_hist['close'] / s_hist.shift(2)['open'] - 1)
+            s_hist['gain_pct'] = 100 * (s_hist.shift(-effect_window)['close'] / s_hist.shift(-1)['open'] - 1)
+            s_hist = s_hist.dropna()  # Drop rows where we don't have gain_pct (usually beginning or end of day)
+            symbol_results.append(s_hist)
+        symbol_results_df = pd.concat(symbol_results)
+        symbol_results_df = symbol_results_df.reset_index(drop=True)
+        return symbol_results_df
+
+    # Collect the testing results for each day
+    results = list()  # List of DataFrame
+    for ts in trading_dates(timestamp('2024-05-17'), timestamp('2024-05-31')):
+        print(ts)
+
+        # Compute the training values
+        train_details = read_intraday_details(previous_trading_date(ts, offset=lookback_window),
+                                              previous_trading_date(ts))
+        training_set = compute_trigger_and_effect_df(train_details)
+
+        # Compute expected gain for each trigger
+        triggers = training_set[training_set['trigger_pct'] >= trigger_gain_threshold]
+        cross_join = triggers.merge(training_set, on='timestamp')
+        average_gains = cross_join.groupby(['symbol_x', 'symbol_y']).agg({'gain_pct_y': ['count', 'mean']})
+        average_gains = average_gains.reset_index(drop=False)
+        average_gains.columns = average_gains.columns.to_flat_index().str.join('_')  # Flatten the multi-index
+        average_gains = average_gains.rename(columns={'symbol_x_': 'independent_symbol',
+                                                      'symbol_y_': 'dependent_symbol',
+                                                      'gain_pct_y_count': 'count',
+                                                      'gain_pct_y_mean': 'mean_gain_pct'})
+        average_gains = average_gains[average_gains['mean_gain_pct'] > 0.5]
+        average_gains['date'] = date_string(ts)
+        results.append(average_gains)
+    results_df = pd.concat(results).round(4)
+    results_df = results_df.sort_values(by=['mean_gain_pct'], ascending=False)
+    results_df.to_csv(temp_files_path('average_gains_2w.csv'), index=False)
+
 # Fast Follower Strategy -- First Approach
 if False:
     lookback_window = 10  # Look at the previous 10 trading days when finding correlations (two weeks)
@@ -107,7 +151,7 @@ if False:
 
     # Collect the testing results for each day
     results = list()  # List of DataFrame
-    for ts in trading_dates(timestamp('2023-12-01'), timestamp('2024-05-31')):
+    for ts in trading_dates(timestamp('2024-05-17'), timestamp('2024-05-31')):
         print(ts)
 
         # Compute the training values
@@ -152,12 +196,12 @@ if False:
                      'trigger_pct', 'count', 'mean_gain_pct', 'gain_pct']]
         results.append(test)
     results_df = pd.concat(results).round(4)
-    results_df.to_csv(temp_files_path('fast_follower_results_6mo_first_try.csv'), index=False)
+    results_df.to_csv(temp_files_path('fast_follower_results_2w_first_try.csv'), index=False)
 
 # Fast Follower Strategy -- Second Approach. Include additional fields to support filtering
 #   compute change over last 5 minutes, 10 minutes, and 15 minutes
 #   compute how often a dependent stock rises at least 0%, 0.5%, and 1.0%
-if True:
+if False:
     lookback_window = 10  # Look at the previous 10 trading days when finding correlations
     trigger_gain_threshold = 1.0  # Trigger if the stock goes up 1% during the trigger window
     mean_gain_threshold = 0.5  # Only accept pairs with average gain of 0.5% per trade in the training
